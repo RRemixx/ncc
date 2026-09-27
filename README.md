@@ -1,77 +1,112 @@
 # [AAAI 2025] Neural Conformal Control for Time Series Forecasting
 This is the official implementation of "[Neural Conformal Control for Time Series Forecasting](https://arxiv.org/pdf/2412.18144)" (NCC) appearing in AAAI 2025 (main track). Authors are Ruipu Li and Alexander Rodríguez from the University of Michigan.
 
-In this repository, we provide the data and code used in our paper's experiments. Code for model, NCC, can be found in `end2endmodel.py`. To visualize results, use `show_results.ipynb`.
+NCC takes the point forecasts of any base forecaster and learns prediction intervals for a set of target error rates (alphas) that keep their coverage over time.
+
+## Repository layout
+```
+setup/
+  e2ecp.yaml                 default NCC parameters
+  cp_exp_params/<exp_id>.yaml   per-experiment overrides of e2ecp.yaml
+src/forecaster/
+  e2ecp.py                   entry point: train NCC / calibrate the test steps
+  e2ecp_utils.py             data preparation, training loop, test-time retraining and adaptation
+  end2endmodel.py            the NCC model
+  basicmodels.py             encoders and attention blocks used by the model
+  loss_utils.py              quantile, coverage, efficiency and monotonicity losses
+  test_time_adapt.py         monotonicity check used by test-time adaptation
+  eval_cp.py                 metrics -> csv
+  metrics.py                 metric implementations
+data/<dataset>_clip_idx.pkl  time steps used for evaluation (e.g. the respiratory season for covid)
+bin/setup.sh                 installs dependencies and creates results/ and models/
+```
 
 ## How to run
-To run the code, clone this repo and follow the instructions below.
+All commands below are run from `src/forecaster/`, because paths in the code and configs are relative to it.
 
-### Setup environment
-Create an venv with python 3.7. Then run `bin/setup.sh` to create the necessary directories and install dependencies.
+### Setup
+Create an environment with Python >= 3.8 (tested with Python 3.10 and PyTorch 2.4), then run:
+```
+cd bin && bash setup.sh
+```
+This installs the dependencies, installs `src/` as the `forecaster` package, and creates `results/base_pred/`, `results/csvs/` and `models/`.
 
-### Step 1: Data preparation
-The five datasets we used in our paper (***flu hospitalization***, ***Covid-19 hospitalization***, ***SMD***, ***Electricity***, ***Weather***) are already pre-processed. The raw data of these datasets are put in `data/` folder in csv format. The `<dataset>_clip_idx.pkl` files in the folder are the indexes we use for evaluation. For example, for the ***covid hospitalization*** dataset, we only evaluate during the respiratory season. The indexes are used to select the respiratory season.
+Training runs on `cuda:0` by default. To use another device, change `training_params.device` in `setup/e2ecp.yaml`.
 
-### Step 2: Get predictions from base forecaster
-First use `src/forecaster/online_training.py` to get the predictions from the base forecaster. Configure the parameters in `setup/exp_params/`. For example, to run experiment 1, use `setup/exp_params/1.yaml`:
-` python online_training.py -i=1 `
-Upon finish, a file under `results/base_pred/` is generated. The base prediction files for our datasets can be downloaded from this [link](https://drive.google.com/drive/folders/1RE0Wwfxvz0_mv9Q2gbNZIzGkL23_dHKG?usp=sharing).
+### Step 1: Get the base forecaster predictions
+NCC calibrates the predictions of a base forecaster. Download the base prediction files used in the paper from this [link](https://drive.google.com/drive/folders/1RE0Wwfxvz0_mv9Q2gbNZIzGkL23_dHKG?usp=sharing) and put them in `results/base_pred/`.
 
-:exclamation: If you want to use our method on a new dataset <new_data>, you can load the data using `src/forecaster/load_std_data.py`, following the steps below:
-+ **Add the data file to the `data/` folder**: The file should be in **csv** format. The columns should contain the data features. And one of the data features will be used as the target. Both the data features and target will need to be specified in the setup files. For an example of how this csv file looks like, check `data/smd.csv`.
-+ **Add corresponding setup files**: Two files need to be added to the `setup/` folder. The first file is `setup/<new_data>.yaml`, which defines the name of the dataset, the target, the path of the data file and some data parameters. See `setup/smd.yaml` as an example. Note that if the 'index_column' is 'NA', then the code will generate the index as integers automatically. If the 'data_features' is an empty list, all the columns in the csv file will be used as data features. The second file is `setup/exp_params/<exp_id>.yaml`. This file defines parameters that are different in different experiments. Note that you can use this file to overwrite the parameters defined in `setup/<new_data>.yaml` and `setup/seq2seq.yaml`. The 'dataset' should match that in `setup/<new_data>.yaml`. See `setup/exp_params/35.yaml` as an example for the smd dataset.
-+ **Modify the code**: In `src/forecaster/online_training.py`, make modifications to the code in the section **add new dataset**.
-+ :tada: Done! You can now use our method on your own dataset!
+To use your own base forecaster, save its predictions in the same format (see [Base prediction format](#base-prediction-format)).
 
+### Step 2: Train NCC and calibrate the test steps
+Pick an experiment from the table below, then run:
+```
+python e2ecp.py -i=<exp_id> -s=<seed> -t    # train, saves models/<exp_id>_<seed>.pt
+python e2ecp.py -i=<exp_id> -s=<seed>       # calibrate the test steps, saves results/<exp_id>_<seed>.pkl
+```
+`-s` is optional and defaults to the `seed` in the config. During the test steps, the model is retrained every `retrain_period` steps on everything observed so far.
 
-:exclamation: To use a new base forecaster:
-+ **Add code**: Add the code for the base forecaster to `src/forecaster/` folder. 
-+ **Modify the code**: Modify model initialization part and forward pass in `online_training.py` and `utils.py` so that it is compatible with the NCC model.
+| exp_id | Dataset | Base forecaster | Steps ahead | Base predictions |
+|---|---|---|---|---|
+| 22055 | Covid-19 hospitalization | seq2seq | 1 | `saved_pred_19.pickle` |
+| 29005 | Covid-19 hospitalization | seq2seq | 2 | `saved_pred_19.pickle` |
+| 29105 | Covid-19 hospitalization | seq2seq | 3 | `saved_pred_19.pickle` |
+| 29205 | Covid-19 hospitalization | seq2seq | 4 | `saved_pred_19.pickle` |
+| 22053 | SMD | seq2seq | 1 | `saved_pred_35.pickle` |
+| 29003 | SMD | seq2seq | 2 | `saved_pred_35.pickle` |
+| 29130 | SMD | seq2seq | 3 | `saved_pred_35.pickle` |
+| 29203 | SMD | seq2seq | 4 | `saved_pred_35.pickle` |
+| 22052 | Electricity | transformer | 1 | `saved_pred_50.pickle` |
+| 22051 | Weather | seq2seq | 1 | `saved_pred_30.pickle` |
 
-### Step 3: Calibrate the predictions with NCC
-Now with the predictions, you can use e2ecp.py to construct the uncertainty bounds. First configure the parameters in `setup/cp_exp_params/<exp_id>.yaml`. Then to train a model for calibration, run:
-` python e2ecp.py -i=<exp_id> -t`
-This will save a trained model's parameters as `models/<exp_id>.pt`. Then to calibrate for the test dataset, run:
-` python e2ecp.py -i=<exp_id>`
-This generates a `<exp_id>_<seed>.pkl` file under the `results/` folder. The results can be downloaded directly from this [link](https://drive.google.com/drive/folders/1KfYcmDPUVc0vJgN6QZ2eB7Z_DwDNIJE6?usp=sharing)
+The calibrated results from the paper can be downloaded from this [link](https://drive.google.com/drive/folders/1KfYcmDPUVc0vJgN6QZ2eB7Z_DwDNIJE6?usp=sharing). Put them in `results/` to evaluate them directly. Retraining with the current code does not reproduce these files exactly: removing unused modules changed the order in which the model's weights are randomly initialized.
 
-#### How to tune hyperparameters for your own dataset or base forecasters?
-The `bayesian_tuning.py` file implements bayesian optimization for hyperparameter tuning. Modify the parameter space and black box function to set the hyperparameters you would like to tune.
+### Step 3: Evaluate
+```
+python eval_cp.py -i=<exp_id> -s=<seed>    # results/csvs/<exp_id>_<seed>.csv: metrics per region, plus their median and mean
+python eval_cp.py -i=<exp_id> -u           # results/csvs/<exp_id>_multi_seeds.csv: all `seeds` in the config, plus their mean
+```
+Options:
++ `-c`: only evaluate the time steps in `data/<dataset>_clip_idx.pkl`. Electricity has no such file and is always evaluated on all test steps.
++ `-o`: sort the interval widths at every step so they shrink as alpha grows.
 
-### Step 4: Visualize the results
-Visualize and analyze the results using `show_results.ipynb` under `src/notebooks/` folder.
+The csv columns are: `rmse`, `nrmse`, `mape` (point forecast errors); `cs_score` (calibration score: mean gap between the target and the observed coverage over all alphas); `norm_crps_val`; `mean_wis` (weighted interval score); `mono` (monotonicity of the intervals in alpha); `cov_50`, `cov_90`, `cov_95` (coverage of the 50/90/95% intervals); `pi_length_90` (half width of the 90% interval); `dvs` (fraction of steps whose intervals are all monotone); `qice`.
+
+## Configuration
+`setup/e2ecp.yaml` holds the default parameters, with comments. Each `setup/cp_exp_params/<exp_id>.yaml` overrides a subset of them and must set `data_file_id`, `val_weeks`, `test_weeks`, `cov_window_size` and `K`. The time steps of a base prediction file are split into train, validation and test, in this order: the last `test_weeks` steps are the test steps, and the `val_weeks` steps before them are the validation steps.
+
+To run NCC on new base predictions, save them as `results/base_pred/saved_pred_<data_file_id>.pickle` and add a config that sets that `data_file_id`.
+
+## Base prediction format
+`results/base_pred/saved_pred_<data_file_id>.pickle` is a pickled dict:
+```python
+{
+    'params': {'dataset': 'smd'},  # dataset name, used to find data/<dataset>_clip_idx.pkl
+    'base_pred': [                 # one entry per time step, in time order
+        (predictions, addition_infos),
+        ...
+    ],
+}
+# predictions[region]: np.ndarray with the forecasts for 1, 2, ..., H steps ahead
+# addition_infos[region]: tuple whose first element is an np.ndarray with the ground truth for the same H steps
+```
+The other elements of `addition_infos[region]` are ignored. Single-series datasets use one region (e.g. `'X'`).
+
+NCC saves `results/<exp_id>_<seed>.pkl` as `{region: {steps_ahead: [(q_hats, y_hat, y), ...]}}`, one entry per test step, where the interval for `alphas[i]` is `y_hat ± q_hats[i]`.
 
 ## Contact
 If you have any questions, please contact Ruipu Li at liruipu@umich.edu.
 
 ## Cite our work
 If you find this work helpful, cite our work:
-<!-- Li, Ruipu, and Alexander Rodríguez. "Neural Conformal Control for Time Series Forecasting." arXiv preprint arXiv:2412.18144 (2024).
+
+Li, Ruipu, and Alexander Rodríguez. "Neural Conformal Control for Time Series Forecasting". In Proceedings of the AAAI Conference on Artificial Intelligence. Vol. 39. 2025.
 ```bibtex
-@article{li2024neural,
+@inproceedings{li2025neural,
   title={Neural Conformal Control for Time Series Forecasting},
   author={Li, Ruipu and Rodr{\'\i}guez, Alexander},
-  journal={arXiv preprint arXiv:2412.18144},
-  year={2024}
-}
-``` -->
-Li, Ruipu, and Alexander Rodríguez. "Neural Conformal Control for Time Series Forecasting". In Proceedings of the AAAI Conference on Artificial Intelligence. Vol. 39.
-```bibtex
-@article{li2024neural,
-  title={Neural Conformal Control for Time Series Forecasting},
-  author={Li, Ruipu and Rodr'\iguez, Alexander},
   booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
   volume={39},
   year={2025}
 }
 ```
-
-## Credits and Attributions
-
-This project includes code from the following sources. We are grateful for their contributions that made this work possible.
-
-1. [conformal-time-series](https://github.com/aangelopoulos/conformal-time-series)  
-   Description: We modify the code from this repo to reimplement ACI and conformal-PID in our experiments. 
-
-2. [SPCI code](https://github.com/hamrel-cxu/SPCI-code)  
-   Description: We implement NexCP based on the code provided in this repo.

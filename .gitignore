@@ -178,3 +178,6 @@ plotregions/
 plotstates/
 
 models/
+
+# macOS
+.DS_Store
