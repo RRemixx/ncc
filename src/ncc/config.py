@@ -44,7 +44,7 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class RetrainConfig:
-    period: int = 5                       # retrain every `period` test steps
+    period: int = 5                       # retrain every `period` issued steps (steps that return q-hats)
     epochs: int = 50                      # epochs of a retrain without stages
     stage_epochs: tuple = (10, 10, 1)     # epochs per stage of a retrain with stages
 
@@ -62,8 +62,9 @@ class NCCConfig:
     alphas: tuple = (0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)  # target miscoverage rates, strictly ascending
     device: str = "cpu"                   # torch device of the model and the losses
     window_size: int                      # length of the calibration history the model reads
-    val_steps: int                        # training ends val_steps steps before the first test step (and each retrain step)
+    val_steps: int                        # training at step t uses the scored origins s < t - val_steps
     init_err_with_alpha: bool = False     # start the miss history at alpha instead of 1
+    n_warmup: int | None = None           # scored origins NCC waits for before its first training; required by NCC()
     model: ModelConfig = field(default_factory=ModelConfig)        # model sizes
     train: TrainConfig                    # initial training
     retrain: RetrainConfig = field(default_factory=RetrainConfig)  # retraining during the test steps

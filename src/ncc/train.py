@@ -1,4 +1,4 @@
-"""Training of the NCC model on the calibration history: fit(), the loss log and early stopping."""
+"""Training of the NCC model on replays of the visible history: fit(), the loss log and early stopping."""
 import logging
 from dataclasses import replace
 
@@ -14,45 +14,56 @@ LR_STEP_EPOCHS = 50     # StepLR decays the learning rate by gamma every this ma
 PATIENCE_EPOCHS = 50    # early stopping patience
 
 
-def fit(model, data, cfg, regions, horizon, train_end, walk_end, schedule):
-    """Trains model in place and returns the LossLog of all epochs.
+def fit(model, store, scaler, locations, origins, t, epochs, cfg, np_rng):
+    """Trains model in place at step t and returns the LossLog of all epochs.
 
-    Each epoch replays the history from scratch: gradient steps over [0, train_end), then a
-    gradient-free walk over [train_end, walk_end).
-    schedule: the epochs of the single run (int), or the epochs of each stage when cfg.train.stages is set.
+    Uses only what the store holds, i.e. what is visible at t. Each epoch replays a fresh history:
+    gradient steps over `origins` (the scored training origins, ascending), then a gradient-free walk
+    over the origins after them up to t - 1. The misses of the replay come from its own q-hats.
+    epochs: the epochs of the single run (int), or of each stage when cfg.train.stages is set.
     Every run (each stage) has its own optimizer, learning rate scheduler and early stopping.
+    np_rng: the np.random.RandomState that shuffles the locations of each batch.
     """
+    device = torch.device(cfg.device)
+    model = model.to(device)
+    walk = range(origins[-1] + 1, t)
+
+    def new_replay():
+        return CalibrationHistory(store, scaler, locations, cfg, np_rng)
+
+    def targets(batch, s):
+        """Normalized scores of origin s (B x 1), in the batch's order."""
+        scores = np.array([[store.normalized_score(r, s)] for r in batch.locations], dtype=np.float32)
+        return torch.from_numpy(scores).to(device)
+
     log = LossLog()
-    for epochs, weights in _runs(cfg, schedule):
-        _fit_run(model, data, cfg, regions, horizon, train_end, walk_end, int(epochs), weights, log)
+    for run_epochs, weights in _runs(cfg, epochs):
+        loss_fn = NCCLoss(weights, cfg.train.K, cfg.alphas, device)
+        _fit_run(model, new_replay, targets, locations, origins, walk, int(run_epochs), loss_fn, cfg, log)
     return log
 
 
-def _runs(cfg, schedule):
+def _runs(cfg, epochs):
     """(epochs, loss weights) of each run. A stage overrides the quantile, coverage and efficiency weights."""
     if cfg.train.stages is None:
-        return [(schedule, cfg.train.weights)]
+        return [(epochs, cfg.train.weights)]
     return [
-        (epochs, replace(cfg.train.weights, quantile=q, coverage=c, efficiency=e))
-        for epochs, (q, c, e) in zip(schedule, (stage.weights for stage in cfg.train.stages))
+        (stage_epochs, replace(cfg.train.weights, quantile=q, coverage=c, efficiency=e))
+        for stage_epochs, (q, c, e) in zip(epochs, (stage.weights for stage in cfg.train.stages))
     ]
 
 
-def _fit_run(model, data, cfg, regions, horizon, train_end, walk_end, epochs, weights, log):
-    device = torch.device(cfg.device)
-    model = model.to(device)
+def _fit_run(model, new_replay, targets, locations, origins, walk, epochs, loss_fn, cfg, log):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr)
-    loss_fn = NCCLoss(weights, cfg.train.K, cfg.alphas, device)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=LR_STEP_EPOCHS, gamma=cfg.train.gamma)
     patience = Patience(PATIENCE_EPOCHS)
-    num_steps = len(data[regions[0]])
     for _ in range(epochs):
-        history = CalibrationHistory(regions, cfg.alphas, cfg.window_size + num_steps + horizon - 1,
-                                     cfg.init_err_with_alpha)
+        replay = new_replay()
         model.train()
-        for t in range(train_end):
-            q_hats, batch = _forward_pass(model, history, data, regions, t, cfg, horizon, device)
-            loss, parts = loss_fn(q_hats, batch.err_seq, batch.input_alphas, batch.scores)
+        for s in origins:
+            batch = replay.window(s, locations)
+            q_hats = _model_output(model, batch)
+            loss, parts = loss_fn(q_hats, batch.err_seq, batch.input_alphas, targets(batch, s))
             log.add(parts)
             optimizer.zero_grad()
             try:
@@ -61,11 +72,14 @@ def _fit_run(model, data, cfg, regions, horizon, train_end, walk_end, epochs, we
                 optimizer.step()
             except RuntimeError:
                 logger.warning('Infinite loss, skipped!')
-        # TODO(paper): the gradient-free walk only advances the history; its outputs are unused,
+            replay.record(s, batch.locations, q_hats, 'train')
+        # TODO(paper): the gradient-free walk only advances the replay; its outputs are unused,
         # and early stopping reads the training loss
         model.eval()
-        for t in range(train_end, walk_end):
-            _forward_pass(model, history, data, regions, t, cfg, horizon, device)
+        with torch.no_grad():
+            for s in walk:
+                batch = replay.window(s, locations)
+                replay.record(s, batch.locations, _model_output(model, batch), 'train')
         total = log.epoch_end()
         scheduler.step()
         if patience(total):
@@ -73,12 +87,9 @@ def _fit_run(model, data, cfg, regions, horizon, train_end, walk_end, epochs, we
     # TODO(paper): no best state is restored; the model keeps the weights of the last epoch
 
 
-def _forward_pass(model, history, data, regions, t, cfg, horizon, device):
-    """Model output at step t (no ACI, no TTA), written into the history. Returns (q_hats, batch)."""
-    batch = history.batch(data, regions, t, cfg.window_size, device)
-    q_hats = model(batch.err_seq, batch.score_seq, batch.qhat_seq, batch.input_alphas)
-    history.update(t + cfg.window_size + horizon - 1, batch, q_hats, batch.q_adj)
-    return q_hats, batch
+def _model_output(model, batch):
+    """Normalized q-hats of a batch, from the model alone (no ACI, no TTA)."""
+    return model(batch.err_seq, batch.score_seq, batch.qhat_seq, batch.input_alphas)
 
 
 class LossLog:

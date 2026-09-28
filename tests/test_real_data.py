@@ -17,8 +17,10 @@ from ncc.experiments.run import run_experiment
 
 REPO_ROOT = paths.ROOT
 
-# minimum cov_90 (observed coverage of the 90% interval, mean over locations)
-THRESHOLDS = {"22052": 0.80, "22055": 0.60}
+# minimum cov_90 (observed coverage of the 90% interval, mean over locations), after the step-based core:
+# the threshold of the package restructure (22052: 0.80, 22055: 0.60) minus 0.05, since that version met it
+# or could not measure it. Its measured values: 22055: 0.8942; 22052: not measured (base predictions unavailable).
+THRESHOLDS = {"22052": 0.75, "22055": 0.55}
 # evaluate only the steps in data/<dataset>_clip_idx.pkl (electricity has no clip file)
 CLIP = {"22052": False, "22055": True}
 

@@ -1,74 +1,128 @@
-"""Calibration history: the past misses, scores and forecasts the model reads through a sliding window."""
+"""Calibration history: the past forecasts, truths, scores and misses the model reads through a window."""
 from typing import NamedTuple
 
 import numpy as np
 import torch
 
+SOURCES = ('train', 'replay', 'online')
+
 
 class Batch(NamedTuple):
-    """Model inputs for one time step. B = locations, W = window size, A = alphas."""
-    regions: list               # location of each row
-    y_hats: torch.Tensor        # (B x 1)
-    ys: torch.Tensor            # (B x 1)
-    scores: torch.Tensor        # (B x 1), |y - y_hat|
-    err_seq: torch.Tensor       # (B x W x A)
-    score_seq: torch.Tensor     # (B x W x 3): y_hat, y, score
-    qhat_seq: torch.Tensor      # (B x W x A)
+    """Model inputs for one step. B = locations, W = window size, A = alphas."""
+    locations: list             # location of each row (shuffled order)
+    err_seq: torch.Tensor       # (B x W x A): past misses
+    score_seq: torch.Tensor     # (B x W x 3): y_hat, y, score (normalized)
+    qhat_seq: torch.Tensor      # (B x W x A): zeros
     input_alphas: torch.Tensor  # (B x A)
-    q_adj: torch.Tensor         # (B x A)
+    q_adj: torch.Tensor         # (B x A): accumulated ACI correction
+    window_origins: np.ndarray  # (B x W): origin of each window entry, -1 for a placeholder
+
+
+class _Entry:
+    """One issued (or replayed) q-hat row of a location. Completed once the store has its feedback."""
+    __slots__ = ('origin', 'q_hat', 'y_hat', 'source', 'features', 'miss')
+
+    def __init__(self, origin, q_hat, y_hat, source):
+        self.origin = origin
+        self.q_hat = q_hat          # (A,) float32, normalized
+        self.y_hat = y_hat          # float32, normalized center
+        self.source = source        # 'train', 'replay' or 'online'
+        self.features = None        # (3,) float32: y_hat, y, score (normalized), once completed
+        self.miss = None            # (A,) float32: 1 if missed, once completed
 
 
 class CalibrationHistory:
-    """Per-location calibration history that the model reads through a sliding window.
+    """Per-location entries ordered by origin, placed when their origin's feedback arrives.
 
-    The outcome of the forecast made at step t is stored at slot t + W + horizon - 1,
-    so the window [t, t + W) only contains outcomes that are already observed.
-    Slots that were never written hold placeholders: miss = 1 (or alpha), score = 0, (y_hat, y) = 0.
+    The window at step t of a location holds the window_size completed entries with the largest
+    origins among those whose feedback arrived at or before t, sorted by origin. Placeholders fill the
+    front while fewer exist: miss = 1 (or alpha), and (y_hat, y, score) = 0.
+    A miss is score_n > q_hat_n, from the entry's own q-hat. Only for an 'online' entry, an external
+    miss given with the feedback replaces it, per alpha.
     """
 
-    def __init__(self, regions, alphas, length, init_err_with_alpha):
-        self.alphas = alphas
-        self.errors = {}        # (A x length): 1 if y fell outside the q-hat interval
-        self.scores = {}        # (length)
-        self.preds_truths = {}  # (length x 2): y_hat, y
-        self.q_adjs = {}        # (A): accumulated conformal correction
-        for region in regions:
-            errors = torch.ones((len(alphas), length))
-            if init_err_with_alpha:
-                errors = errors * torch.tensor(alphas)[:, None]
-            self.errors[region] = errors
-            self.scores[region] = torch.zeros(length)
-            self.preds_truths[region] = torch.zeros((length, 2))
-            self.q_adjs[region] = torch.zeros(len(alphas))
+    def __init__(self, store, scaler, locations, cfg, rng):
+        """store: SeriesStore; scaler: fitted Scaler; cfg: NCCConfig; rng: np.random.RandomState of the shuffles."""
+        self.store = store
+        self.scaler = scaler
+        self.rng = rng
+        self.alphas = cfg.alphas
+        self.window_size = cfg.window_size
+        self.device = torch.device(cfg.device)
+        placeholder = np.ones(len(cfg.alphas), dtype=np.float32)
+        if cfg.init_err_with_alpha:
+            placeholder = placeholder * np.asarray(cfg.alphas, dtype=np.float32)
+        self._placeholder_miss = placeholder
+        self._entries = {location: [] for location in locations}
 
-    def batch(self, data, regions, t, window_size, device):
-        """Batch of step t: all regions in a new random order (np.random), each with the window [t, t + W).
+    def record(self, origin, locations, q_hats, source):
+        """Creates the entries of origin for locations; q_hats (B x A, normalized) has one row per location.
 
-        data[region][t] = (y_hat_n, y_n).
+        Origins must be recorded in ascending order per location.
         """
-        region_idxs = np.arange(len(regions))
-        np.random.shuffle(region_idxs)
-        batch_regions = [regions[i] for i in region_idxs]
-        window = slice(t, t + window_size)
-        y_hats = torch.Tensor([[data[region][t][0]] for region in batch_regions]).to(device)
-        ys = torch.Tensor([[data[region][t][1]] for region in batch_regions]).to(device)
-        err_seq = torch.stack([self.errors[region][:, window].T for region in batch_regions]).to(device)
-        score_seq = torch.stack([
-            torch.cat([self.preds_truths[region][window], self.scores[region][window, None]], dim=1)
-            for region in batch_regions
-        ]).to(device)
-        # TODO(paper): the q-hat history is never written, so the q-hat encoder always sees zeros
-        qhat_seq = torch.zeros((len(regions), window_size, len(self.alphas))).to(device)
-        input_alphas = torch.tensor(self.alphas)[None, :].repeat(len(regions), 1).to(device)
-        q_adj = torch.stack([self.q_adjs[region] for region in batch_regions]).to(device)
-        scores = torch.abs(y_hats - ys)
-        return Batch(batch_regions, y_hats, ys, scores, err_seq, score_seq, qhat_seq, input_alphas, q_adj)
+        assert source in SOURCES
+        q_hats = q_hats.detach().cpu().numpy() if torch.is_tensor(q_hats) else np.asarray(q_hats)
+        for q_hat, location in zip(q_hats, locations):
+            y_hat = np.float32(self.scaler.transform(location, self.store.center(location, origin)))
+            self._entries[location].append(_Entry(origin, q_hat.astype(np.float32), y_hat, source))
 
-    def update(self, idx, batch, q_hats, q_adj):
-        """Writes the outcome of the batch's step into slot idx; a miss is q_hat < score."""
-        for r, region in enumerate(batch.regions):
-            self.preds_truths[region][idx, 0] = batch.y_hats[r, 0]
-            self.preds_truths[region][idx, 1] = batch.ys[r, 0]
-            self.q_adjs[region] = q_adj[r]
-            self.errors[region][:, idx] = (q_hats[r] < batch.scores[r]).cpu().float()
-            self.scores[region][idx] = batch.scores[r, 0]
+    def window(self, t, locations, q_adj=None):
+        """Batch of step t: locations in a new random order, each with its window at t.
+
+        q_adj: {location: tensor (A,)}, the ACI state; zeros when None.
+        """
+        order = np.arange(len(locations))
+        self.rng.shuffle(order)
+        batch_locations = [locations[i] for i in order]
+        num_alphas, w = len(self.alphas), self.window_size
+        err_seq = np.empty((len(order), w, num_alphas), dtype=np.float32)
+        score_seq = np.zeros((len(order), w, 3), dtype=np.float32)
+        window_origins = np.full((len(order), w), -1, dtype=np.int64)
+        for b, location in enumerate(batch_locations):
+            entries = self._latest(location, t)
+            pad = w - len(entries)
+            err_seq[b, :pad] = self._placeholder_miss
+            for i, entry in enumerate(entries, start=pad):
+                err_seq[b, i] = entry.miss
+                score_seq[b, i] = entry.features
+                window_origins[b, i] = entry.origin
+        # TODO(paper): the q-hat history is never written, so the q-hat encoder always sees zeros
+        qhat_seq = torch.zeros((len(order), w, num_alphas))
+        input_alphas = torch.tensor(self.alphas)[None, :].repeat(len(order), 1)
+        if q_adj is None:
+            q_adj_rows = torch.zeros((len(order), num_alphas))
+        else:
+            q_adj_rows = torch.stack([q_adj[location] for location in batch_locations])
+        return Batch(batch_locations, torch.from_numpy(err_seq).to(self.device),
+                     torch.from_numpy(score_seq).to(self.device), qhat_seq.to(self.device),
+                     input_alphas.to(self.device), q_adj_rows.to(self.device), window_origins)
+
+    def _latest(self, location, t):
+        """The window_size latest completed entries of location with feedback arrived at or before t, by origin."""
+        latest = []
+        for entry in reversed(self._entries[location]):
+            if len(latest) == self.window_size:
+                break
+            if self._complete(location, entry) and self.store.arrived(location, entry.origin) <= t:
+                latest.append(entry)
+        latest.reverse()
+        return latest
+
+    def _complete(self, location, entry):
+        """Completes entry from the store if its feedback has arrived; returns whether it is complete."""
+        if entry.features is not None:
+            return True
+        if not self.store.has_feedback(location, entry.origin):
+            return False
+        origin = entry.origin
+        y = np.float32(self.scaler.transform(location, self.store.truth(location, origin)))
+        score = self.store.normalized_score(location, origin)
+        miss = (score > entry.q_hat).astype(np.float32)
+        external_miss = self.store.external_miss(location, origin)
+        if entry.source == 'online' and external_miss is not None:
+            for i, external in enumerate(external_miss):
+                if external is not None:
+                    miss[i] = float(bool(external))
+        entry.features = np.array([entry.y_hat, y, score], dtype=np.float32)
+        entry.miss = miss
+        return True
