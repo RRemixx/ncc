@@ -1,5 +1,0 @@
-numpy
-torch
-PyYAML
-scikit-learn
-properscoring

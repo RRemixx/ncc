@@ -1,0 +1,18 @@
+# NCC on covid, seq2seq base forecaster, 4-step ahead (base predictions: saved_pred_19.pickle)
+base_pred_id: 19
+horizon: 4
+test_steps: 122
+max_steps: 70
+ncc:
+  val_steps: 1
+  window_size: 15
+  init_err_with_alpha: true
+  model: {hidden_dim: 512, qhat_encoder_hidden_dim: 128, qhat_encoder_num_layers: 8, error_encoder_hidden_dim: 64,
+          alpha_encoder_hidden_dim: 128, q_fc_hidden_dim: 64}
+  train:
+    K: 2.26
+    stages:
+      - {epochs: 50, weights: [0.1, 0, 0]}
+      - {epochs: 50, weights: [0, 1, 0]}
+      - {epochs: 1, weights: [0.1, 1, 0]}
+  retrain: {period: 2, stage_epochs: [10, 10, 2]}

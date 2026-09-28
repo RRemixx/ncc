@@ -1,0 +1,17 @@
+# NCC on electricity, transformer base forecaster, 1-step ahead (base predictions: saved_pred_50.pickle)
+base_pred_id: 50
+horizon: 1
+test_steps: 150
+ncc:
+  val_steps: 100
+  window_size: 20
+  model: {hidden_dim: 128, score_encoder_hidden_dim: 32, score_encoder_num_layers: 8, qhat_encoder_hidden_dim: 128,
+          qhat_encoder_num_layers: 8, error_encoder_hidden_dim: 64, alpha_encoder_hidden_dim: 64}
+  train:
+    K: 3
+    stages:
+      - {epochs: 100, weights: [1, 0, 0]}
+      - {epochs: 50, weights: [0, 1, 0.05]}
+      - {epochs: 10, weights: [0.01, 1, 0.1]}
+  retrain: {period: 2, stage_epochs: [5, 5, 7]}
+  tta: {enabled: true}

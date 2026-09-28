@@ -1,0 +1,15 @@
+# NCC on weather, seq2seq base forecaster, 1-step ahead (base predictions: saved_pred_30.pickle)
+base_pred_id: 30
+horizon: 1
+test_steps: 144
+ncc:
+  val_steps: 144
+  window_size: 25
+  model: {hidden_dim: 32, score_encoder_hidden_dim: 32, score_encoder_num_layers: 8, qhat_encoder_hidden_dim: 128,
+          qhat_encoder_num_layers: 8, error_encoder_hidden_dim: 64, alpha_encoder_hidden_dim: 64}
+  train:
+    epochs: 200
+    K: 0.37
+    weights: {quantile: 0.21, efficiency: 4.5e-05}
+  retrain: {epochs: 20}
+  tta: {enabled: true}

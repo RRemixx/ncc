@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
+# Run from bin/: installs the ncc package (editable, with the test extra) and creates the output directories.
 
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-echo "Installing dependencies..."
-pip install -r ../requirements.txt
+echo "Installing the ncc package..."
+pip install -e "..[test]"
 
-echo "Cleaning old build artifacts..."
-rm -rf ../src/build/ ../src/dist/ ../src/*.egg-info
-
-echo "Building the source distribution and wheel..."
-pip install -e ../src/
-
-echo "Make directories"
-mkdir ../results
-mkdir ../results/base_pred
-mkdir ../results/csvs
-mkdir ../models
+echo "Making directories..."
+mkdir -p ../results/base_pred ../results/csvs ../models
 
 echo "Done!"

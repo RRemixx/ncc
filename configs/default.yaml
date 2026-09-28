@@ -1,0 +1,12 @@
+# Paper defaults. Each configs/experiments/<exp_id>.yaml is merged onto this file (nested mappings are
+# merged recursively, lists are replaced) and must set base_pred_id, horizon and test_steps, plus
+# ncc.val_steps, ncc.window_size and ncc.train.K.
+# The defaults of every `ncc:` key live in src/ncc/config.py (NCCConfig); only the paper's values
+# that differ from them are set here.
+
+seed: 1
+seeds: [1, 2, 3, 4]          # evaluated by `evaluate -u`
+max_steps: 10000             # the run stops after step max_steps
+# base_pred_id, horizon, test_steps: set per experiment
+ncc:
+  device: cuda:0             # the paper runs used cuda:0; NCCConfig's own default is cpu

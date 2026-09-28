@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ncc"
+version = "0.2.0"
+description = "Neural Conformal Control for Time Series Forecasting"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Ruipu Li", email = "liruipu@umich.edu" },
+    { name = "Alexander Rodríguez" },
+]
+dependencies = ["numpy", "torch", "PyYAML", "scikit-learn", "properscoring"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: real-data runs on Apple-silicon MPS (R3); run with `pytest -m slow`"]
+addopts = "-m 'not slow'"
